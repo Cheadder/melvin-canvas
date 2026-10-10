@@ -18,8 +18,16 @@
     green: ['#22c55e', '#14b8a6'], amber: ['#f59e0b', '#ef4444'], pink: ['#ec4899', '#f97316'],
     red: ['#ef4444', '#f97316'], teal: ['#14b8a6', '#22d3ee']
   };
-  var S = { spec: null, nonce: null, answers: {}, initial: {}, fields: [], dirty: false, busy: false, charts: [], width: 0 };
+  var S = { spec: null, nonce: null, answers: {}, initial: {}, fields: [], dirty: false, busy: false, charts: [], width: 0,
+    save: null, sheet: false, accentHex: '#8b5cf6' };
   var uid = 0;
+  // The paper (kind "paper"): a row's untouched value ("open" item, "wait" proposal, "parked" proposal, or an item
+  // already done / snoozed / stopped) is shown as NO selection and never as a button, so only the reader's own taps
+  // light up; tapping a lit option again clears it. A closed item says so in a small tag next to its title.
+  var PAPER_REST = ['open', 'wait', 'parked', 'done', 'snoozed', 'stopped'];
+  var PAPER_CLOSED = ['done', 'snoozed', 'stopped'];
+  // footers from older paper builds ("... “done 3” still works."): the paper carries no help notes
+  var PAPER_FOOT_RE = /still works\.?$|^Save changes only/i;
 
   // ------------------------------------------------------------------------------------------------ helpers
   function el(tag, cls, text) {
@@ -116,6 +124,7 @@
     var pair = ACCENTS[(S.spec && S.spec.accent) || ''];
     var a1 = pair ? pair[0] : (hexToRgb(t.button_color) ? t.button_color : '#8b5cf6');
     var a2 = pair ? pair[1] : rotate(a1, 42);
+    S.accentHex = rgbToHex(hexToRgb(a1));
     st.setProperty('--accent-rgb', hexToRgb(a1).join(', '));
     st.setProperty('--accent2-rgb', hexToRgb(a2).join(', '));
     st.setProperty('--accent-text', pair ? '#ffffff' : (hexToRgb(t.button_text_color) ? t.button_text_color : '#ffffff'));
@@ -173,6 +182,17 @@
     S.dirty = !equal(S.answers, S.initial);
     TG.closingConfirmation(S.dirty);
     if (S.nonce) { session('melvin-canvas:a:' + S.nonce, JSON.stringify(S.answers)); }
+    updateSave();
+  }
+  function isPaper() { return !!(S.spec && S.spec.kind === 'paper'); }
+  function restOf(b) {
+    if (!isPaper() || !b || b.type !== 'choice') { return null; }
+    var v = S.initial[b.id];
+    if (PAPER_REST.indexOf(v) < 0) { return null; }
+    return (b.options || []).some(function (o) { return o.value === v; }) ? v : null;
+  }
+  function changedCount() {
+    return S.fields.filter(function (b) { return !equal(S.answers[b.id], S.initial[b.id]); }).length;
   }
   function restoreDraft() {
     if (!S.nonce) { return; }
@@ -334,9 +354,39 @@
     if (b.hint) { f.appendChild(el('div', 'fhint', str(b.hint, 140))); }
     return f;
   }
+  // a parked proposal on the paper: its name and one "Bring back" button (tap again = stays parked)
+  function parkedRow(b, rest, opt) {
+    var r = el('div', 'parked-row');
+    var main = el('span', 'pmain');
+    main.appendChild(el('span', 'plabel', str(b.label, 90)));
+    if (b.hint) { main.appendChild(el('span', 'phint', str(b.hint, 140))); }
+    r.appendChild(main);
+    var bt = el('button', 'pbtn', str(opt.label, 24) || 'Bring back');
+    bt.type = 'button';
+    function paint() {
+      var on = S.answers[b.id] === opt.value;
+      bt.setAttribute('aria-pressed', String(on));
+      r.classList.toggle('on', on);
+    }
+    bt.addEventListener('click', function () {
+      setAnswer(b.id, S.answers[b.id] === opt.value ? rest : opt.value);
+      paint();
+      TG.haptic('selection');
+    });
+    r.appendChild(bt);
+    paint();
+    return r;
+  }
   R.choice = function (b) {
+    var rest = restOf(b);
+    var opts = (b.options || []).slice(0, 12).filter(function (o) { return rest === null || o.value !== rest; });
+    if (rest === 'parked' && opts.length) { return parkedRow(b, rest, opts[0]); }
     var f = fieldShell(b);
-    var opts = (b.options || []).slice(0, 12);
+    if (rest !== null) { f.classList.add('rest'); }
+    if (PAPER_CLOSED.indexOf(rest) >= 0) {
+      var was = (b.options || []).filter(function (o) { return o.value === rest; })[0];
+      f.firstChild.appendChild(el('span', 'ftag', str(was && was.label, 24)));
+    }
     var nodes = [];
     function idx() {
       for (var k = 0; k < opts.length; k++) { if (opts[k].value === S.answers[b.id]) { return k; } }
@@ -351,8 +401,14 @@
         pill.style.opacity = i < 0 ? '0' : '1';
         pill.style.transform = 'translateX(' + (Math.max(i, 0) * 100) + '%)';
       }
+      if (rest !== null) { f.classList.toggle('touched', !equal(S.answers[b.id], S.initial[b.id])); }
     }
-    function pick(k) { setAnswer(b.id, opts[k].value); paint(); TG.haptic('selection'); }
+    function pick(k) {
+      var v = opts[k].value;
+      setAnswer(b.id, rest !== null && S.answers[b.id] === v ? rest : v);
+      paint();
+      TG.haptic('selection');
+    }
     var group;
     if (b.style === 'segmented') {
       group = el('div', 'seg');
@@ -606,15 +662,33 @@
       if (spec.subtitle) { head.appendChild(el('p', '', str(spec.subtitle, 160))); }
       app.appendChild(head);
     }
-    blocks.slice(0, 80).forEach(function (b) {
-      if (!b || typeof b !== 'object' || typeof b.type !== 'string' || !Object.prototype.hasOwnProperty.call(R, b.type)) { return; }
-      if (INPUT_TYPES.indexOf(b.type) >= 0 && !(b.id in S.answers)) { return; }
-      var node = R[b.type](b);
+    var list = blocks.slice(0, 80), paper = isPaper();
+    function usable(b) {
+      if (!b || typeof b !== 'object' || typeof b.type !== 'string' || !Object.prototype.hasOwnProperty.call(R, b.type)) { return false; }
+      if (INPUT_TYPES.indexOf(b.type) >= 0 && !(b.id in S.answers)) { return false; }
+      return !(paper && b.type === 'note' && PAPER_FOOT_RE.test(str(b.text, 400)));
+    }
+    function add(node) {
       if (!node) { return; }
       node.classList.add('rise');
       node.style.setProperty('--i', String(Math.min(k++, 14)));
       app.appendChild(node);
-    });
+    }
+    for (var i = 0; i < list.length; i++) {
+      var b = list[i];
+      if (!usable(b)) { continue; }
+      if (paper && b.type === 'section') {          // a section of parked proposals only: one small folded list
+        var j = i + 1, rows = [];
+        while (j < list.length && !(list[j] && list[j].type === 'section')) { rows.push(list[j]); j++; }
+        rows = rows.filter(usable);
+        if (rows.length && rows.every(function (g) { return restOf(g) === 'parked'; })) {
+          add(foldGroup(b, rows));
+          i = j - 1;
+          continue;
+        }
+      }
+      add(R[b.type](b));
+    }
     renderBar(spec);
     window.requestAnimationFrame(function () {
       S.width = app.clientWidth;
@@ -623,10 +697,67 @@
     });
   }
 
+  function foldGroup(sec, rows) {
+    var d = el('details', 'glass fold');
+    var s = el('summary');
+    s.appendChild(el('span', 'ft', str(sec.title, 60)));
+    s.appendChild(el('span', 'fc', String(rows.length)));
+    s.appendChild(el('span', 'chev'));
+    d.appendChild(s);
+    var body = el('div', 'fold-body');
+    rows.forEach(function (g) { var n = R.choice(g); if (n) { body.appendChild(n); } });
+    d.appendChild(body);
+    if (rows.some(function (g) { return !equal(S.answers[g.id], S.initial[g.id]); })) { d.open = true; }
+    s.addEventListener('click', function () { TG.haptic('selection'); });
+    return d;
+  }
+
+  // ------------------------------------------------------------------------------------------------ the paper's Save
+  // No Close (Telegram has its own at the top) and no help notes: one Save that appears once something changed and
+  // says how much ("Save 2 changes"). In Telegram it is Telegram's own bottom button; elsewhere one sticky button.
+  function saveLabel(n) { return 'Save ' + n + (n === 1 ? ' change' : ' changes'); }
+  function paperBar(acts) {
+    var a = acts.filter(function (x) { return !x.close && x.id !== 'cancel'; })[0];
+    bar.textContent = '';
+    if (!a) { bar.hidden = true; app.classList.add('no-bar'); S.save = null; return; }
+    S.save = { act: a, btn: null, native: false };
+    // the private iCloud host has no main button (no TG.mainButton): it gets the page's own Save
+    if (TG.inTelegram && S.nonce && typeof TG.mainButton === 'function' && TG.mainButton({ visible: false, text: 'Save' })) {
+      S.save.native = true;
+      S.save.btn = el('button');                      // detached: send() keeps its busy state here
+      TG.on('main_button_pressed', function () {
+        if (S.save && S.save.native && !S.busy && !S.sheet && changedCount()) { onAction(S.save.act, S.save.btn); }
+      });
+      bar.hidden = true;
+      app.classList.add('no-bar');
+    } else {
+      var inner = el('div', 'inner');
+      var bt = el('button', 'btn primary', 'Save');
+      bt.type = 'button';
+      bt.addEventListener('click', function () { onAction(a, bt); });
+      inner.appendChild(bt);
+      bar.appendChild(inner);
+      S.save.btn = bt;
+      app.classList.remove('no-bar');
+    }
+    updateSave();
+  }
+  function updateSave() {
+    if (!S.save || S.busy) { return; }
+    var n = changedCount();
+    if (S.save.native) {
+      TG.mainButton({ visible: n > 0 && !S.sheet, text: saveLabel(n), color: S.accentHex, textColor: '#ffffff', shine: true });
+      return;
+    }
+    S.save.btn.textContent = saveLabel(n);
+    bar.hidden = n === 0;
+  }
+
   var STYLE_ORDER = { ghost: 0, secondary: 1, danger: 2, primary: 3 };
   function renderBar(spec) {
     bar.textContent = '';
     var acts = (Array.isArray(spec.actions) && spec.actions.length ? spec.actions : [{ id: 'done', label: 'Done', style: 'primary', close: true }]).slice(0, 3);
+    if (isPaper()) { paperBar(acts); return; }
     var inner = el('div', 'inner');
     acts.slice().sort(function (a, b) { return (STYLE_ORDER[a.style] || 0) - (STYLE_ORDER[b.style] || 0); }).forEach(function (a) {
       var st = STYLE_ORDER.hasOwnProperty(a.style) ? a.style : 'primary';
@@ -668,6 +799,7 @@
       } else {
         say = v ? (v.length > 60 ? v.slice(0, 59) + '…' : v) : '—';
       }
+      if (isPaper() && !changed) { return; }          // the paper lists only what the reader touched
       rows.push({ label: str(b.label, 90), say: say, changed: changed });
     });
     return { on: on, rows: rows };
@@ -710,9 +842,13 @@
     sheet.appendChild(acts);
     doc.body.appendChild(scrim);
     doc.body.appendChild(sheet);
+    S.sheet = true;
+    updateSave();                                     // Telegram's Save button steps aside while the sheet is up
     window.requestAnimationFrame(function () { scrim.classList.add('open'); sheet.classList.add('open'); });
     TG.haptic('impact', 'medium');
     function close() {
+      S.sheet = false;
+      updateSave();
       scrim.classList.remove('open');
       sheet.classList.remove('open');
       setTimeout(function () { scrim.remove(); sheet.remove(); }, 420);
@@ -744,6 +880,9 @@
       return;
     }
     S.busy = true;
+    if (S.save && S.save.native) {
+      TG.mainButton({ visible: true, active: false, progress: true, text: 'Saving…', color: S.accentHex, textColor: '#ffffff' });
+    }
     var label = bt.textContent;
     bt.disabled = true;
     bt.textContent = '';
@@ -771,7 +910,7 @@
         reset();
       }, 2500);
     }, 620);
-    function reset() { S.busy = false; bt.disabled = false; bt.textContent = label; }
+    function reset() { S.busy = false; bt.disabled = false; bt.textContent = label; updateSave(); }
   }
 
   function showPayload(payload) {
