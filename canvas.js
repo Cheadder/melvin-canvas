@@ -19,7 +19,7 @@
     red: ['#ef4444', '#f97316'], teal: ['#14b8a6', '#22d3ee']
   };
   var S = { spec: null, nonce: null, answers: {}, initial: {}, fields: [], dirty: false, busy: false, charts: [], width: 0,
-    save: null, sheet: false, accentHex: '#8b5cf6' };
+    save: null, sheet: false, accentHex: '#8b5cf6', budget: null };
   var uid = 0;
   // The paper (kind "paper"): a row's untouched value ("open" item, "wait" proposal, "parked" proposal, or an item
   // already done / snoozed / stopped) is shown as NO selection and never as a button, so only the reader's own taps
@@ -183,6 +183,11 @@
     TG.closingConfirmation(S.dirty);
     if (S.nonce) { session('melvin-canvas:a:' + S.nonce, JSON.stringify(S.answers)); }
     updateSave();
+    if (S.budget) {
+      var n = utf8Bytes(JSON.stringify(S.answers)), limit = S.spec.answer_budget_bytes;
+      S.budget.textContent = n <= limit ? 'Answer space: ' + (limit - n) + ' bytes left.' :
+        'Shorten your answers by at least ' + (n - limit) + ' bytes. Your text is kept.';
+    }
   }
   function isPaper() { return !!(S.spec && S.spec.kind === 'paper'); }
   function restOf(b) {
@@ -405,6 +410,17 @@
     }
     function pick(k) {
       var v = opts[k].value;
+      if (isPaper() && b.id === 'wq' && v !== 'else') {
+        // A deliberate suggestion/Skip tap supersedes an older typed name.
+        if (Object.prototype.hasOwnProperty.call(S.answers, 'wq_text')) { setAnswer('wq_text', ''); }
+        var input = doc.getElementById('f-wq_text');
+        if (input) {
+          input.value = '';
+          if (input.nextElementSibling && input.nextElementSibling.classList.contains('count')) {
+            input.nextElementSibling.textContent = '0 / ' + input.maxLength;
+          }
+        }
+      }
       setAnswer(b.id, rest !== null && S.answers[b.id] === v ? rest : v);
       paint();
       TG.haptic('selection');
@@ -417,6 +433,7 @@
       opts.forEach(function (o, k) {
         var bt = el('button', '', (o.emoji ? str(o.emoji, 8) + ' ' : '') + str(o.label, 60));
         bt.type = 'button';
+        if (isPaper() && b.id === 'wq' && o.value === 'else') { bt.id = 'wq-custom-choice'; }
         bt.setAttribute('role', 'radio');
         bt.addEventListener('click', function () { pick(k); });
         nodes.push(bt);
@@ -427,6 +444,7 @@
       opts.forEach(function (o, k) {
         var bt = el('button', 'opt');
         bt.type = 'button';
+        if (isPaper() && b.id === 'wq' && o.value === 'else') { bt.id = 'wq-custom-choice'; }
         bt.setAttribute('role', 'radio');
         if (o.emoji) { bt.appendChild(el('span', 'oe', str(o.emoji, 8))); }
         var body = el('span', 'ob');
@@ -502,7 +520,15 @@
       count.textContent = t.value.length + ' / ' + t.maxLength;
       if (b.multiline) { t.style.height = 'auto'; t.style.height = Math.min(260, t.scrollHeight + 2) + 'px'; }
     }
-    t.addEventListener('input', function () { setAnswer(b.id, t.value); upd(); });
+    t.addEventListener('input', function () {
+      setAnswer(b.id, t.value);
+      if (isPaper() && b.id === 'wq_text' && t.value.trim() && S.answers.wq !== 'else') {
+        // Newly typed text supersedes a prior suggestion/Skip via its existing control.
+        var custom = doc.getElementById('wq-custom-choice');
+        if (custom) { custom.click(); }
+      }
+      upd();
+    });
     if (!b.multiline) { t.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); t.blur(); } }); }
     f.appendChild(t);
     f.appendChild(count);
@@ -689,6 +715,9 @@
       }
       add(R[b.type](b));
     }
+    S.budget = spec.answer_budget_bytes ? el('p', 'foot', 'Answer space: ' +
+      (spec.answer_budget_bytes - utf8Bytes(JSON.stringify(S.answers))) + ' bytes left in total.') : null;
+    if (S.budget) { add(S.budget); }
     renderBar(spec);
     window.requestAnimationFrame(function () {
       S.width = app.clientWidth;
@@ -873,7 +902,11 @@
 
   function send(a, bt, data) {
     var payload = JSON.stringify({ v: 1, nonce: S.nonce || 'demo-demo-demo-1', act: a.id, data: data });
-    var bytes = window.TextEncoder ? new TextEncoder().encode(payload).length : unescape(encodeURIComponent(payload)).length;
+    var bytes = utf8Bytes(payload), answerBytes = utf8Bytes(JSON.stringify(data));
+    if (S.spec.answer_budget_bytes && answerBytes > S.spec.answer_budget_bytes) {
+      toast('Shorten your answers by at least ' + (answerBytes - S.spec.answer_budget_bytes) + ' bytes. Your text is kept.');
+      return;
+    }
     if (bytes > 4096) {
       TG.haptic('notification', 'error');
       toast('That’s a bit too much text to send. Shorten it a little.');
@@ -881,25 +914,27 @@
     }
     S.busy = true;
     if (S.save && S.save.native) {
-      TG.mainButton({ visible: true, active: false, progress: true, text: 'Saving…', color: S.accentHex, textColor: '#ffffff' });
+      TG.mainButton({ visible: true, active: false, progress: true, text: 'Sending…', color: S.accentHex, textColor: '#ffffff' });
     }
     var label = bt.textContent;
     bt.disabled = true;
-    bt.textContent = '';
+    bt.textContent = 'Sending…';
     bt.appendChild(el('span', 'spin'));
     TG.closingConfirmation(false);
     setTimeout(function () {
-      bt.textContent = a.id === 'cancel' ? '✓' : '✓ Sent';
-      if (a.id !== 'cancel') { burst(); }
-      TG.haptic('notification', 'success');
-    }, 240);
-    setTimeout(function () {
-      if (S.nonce) { session('melvin-canvas:a:' + S.nonce, null); }
       var posted = TG.inTelegram && S.nonce ? TG.sendData(payload) : false;
       if (!posted) {
         showPayload(payload);
         reset();
         return;
+      }
+      // This confirms only the transport handoff, never a backend save.
+      bt.textContent = '✓ Sent';
+      TG.haptic('notification', 'success');
+      if (S.nonce) {
+        // sendData acceptance is not a backend save acknowledgement. Preserve
+        // the complete draft, including selections, through a refused save.
+        session('melvin-canvas:a:' + S.nonce, JSON.stringify(S.answers));
       }
       // a host that stays open after sending (the private iCloud route) reports back itself; reset() allows a retry
       if (typeof TG.afterSend === 'function') { TG.afterSend(a.id, reset); return; }
@@ -911,6 +946,10 @@
       }, 2500);
     }, 620);
     function reset() { S.busy = false; bt.disabled = false; bt.textContent = label; updateSave(); }
+  }
+
+  function utf8Bytes(value) {
+    return window.TextEncoder ? new TextEncoder().encode(value).length : unescape(encodeURIComponent(value)).length;
   }
 
   function showPayload(payload) {

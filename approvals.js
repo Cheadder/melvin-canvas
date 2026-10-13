@@ -80,9 +80,11 @@
       });
       if (opts.length < 2) { throw new Error('bad_page'); }
       return { id: q.id, asker: str(q.a, 24) || 'Someone', time: str(q.t, 24), question: str(q.q, 300),
-        detail: str(q.d, 400), urgent: !!q.u, options: opts };
+        detail: str(q.d, 400), urgent: !!q.u, options: opts,
+        textMax: Number.isInteger(q.m) && q.m > 0 && q.m <= 300 ? q.m : 0 };
     });
-    return { title: str(page.title, 80) || 'Questions for you', sub: str(page.sub, 160), questions: qs };
+    return { title: str(page.title, 80) || 'Questions for you', sub: str(page.sub, 160), questions: qs,
+      answerBudget: Number.isInteger(page.answer_budget_bytes) && page.answer_budget_bytes > 0 && page.answer_budget_bytes <= 3800 ? page.answer_budget_bytes : null };
   }
   function load(token) {
     if (token === 'demo') { return Promise.resolve({ nonce: null, page: clean(DEMO) }); }
@@ -97,7 +99,7 @@
 
   // ------------------------------------------------------------------------------------------------ answers
   function answeredCount() {
-    return S.page.questions.filter(function (q) { return !!S.answers[q.id]; }).length;
+    return S.page.questions.filter(function (q) { return !!S.answers[q.id] || !!String(S.answers[q.id + '_text'] || '').trim(); }).length;
   }
   function saveDraft() {
     if (S.nonce) { session('melvin-approvals:a:' + S.nonce, JSON.stringify(S.answers)); }
@@ -110,6 +112,8 @@
       if (!d) { return; }
       S.page.questions.forEach(function (q) {
         if (q.options.some(function (o) { return o.value === d[q.id]; })) { S.answers[q.id] = d[q.id]; }
+        var text = d[q.id + '_text'];
+        if (q.textMax && typeof text === 'string' && text.length <= q.textMax) { S.answers[q.id + '_text'] = text; }
       });
     } catch (e) { /* a broken draft is ignored */ }
   }
@@ -126,9 +130,11 @@
     var n = S.nodes[q.id];
     if (!n) { return; }
     var v = S.answers[q.id];
-    n.card.classList.toggle('answered', !!v);
+    var hasText = !!String(S.answers[q.id + '_text'] || '').trim();
+    n.card.classList.toggle('answered', !!v || hasText);
     n.card.classList.remove('tone-good', 'tone-bad', 'tone-pick');
-    if (v) { n.card.classList.add('tone-' + tone(v)); }
+    if (hasText) { n.card.classList.add('tone-pick'); }
+    else if (v) { n.card.classList.add('tone-' + tone(v)); }
     n.buttons.forEach(function (b) { b.setAttribute('aria-checked', String(b.getAttribute('data-v') === v)); });
   }
 
@@ -177,6 +183,21 @@
       grid.appendChild(b);
     });
     c.appendChild(grid);
+    if (q.textMax) {
+      var label = el('label', 'custom-label', 'Your answer or clarification');
+      var input = el('textarea', 'custom-answer');
+      input.id = q.id + '_text';
+      label.setAttribute('for', input.id);
+      input.maxLength = q.textMax;
+      input.rows = 2;
+      input.placeholder = 'Optional. Typed clarification does not grant permission.';
+      input.value = S.answers[input.id] || '';
+      input.addEventListener('input', function () {
+        S.answers[input.id] = input.value;
+        paint(q); paintBar(); saveDraft();
+      });
+      c.appendChild(label); c.appendChild(input);
+    }
     S.nodes[q.id] = { card: c, buttons: buttons };
     return c;
   }
@@ -217,22 +238,41 @@
     if (total === 1) {
       var q = S.page.questions[0], v = S.answers[q.id];
       var o = q.options.filter(function (x) { return x.value === v; })[0];
-      sendBtn.textContent = o ? 'Send: ' + o.label : 'Pick an answer';
-      stateLine.textContent = o ? 'Melvin records it the moment you send.' : '';
+      var hasText = !!String(S.answers[q.id + '_text'] || '').trim();
+      sendBtn.textContent = hasText ? 'Send clarification' : (o ? 'Send: ' + o.label : 'Choose or type an answer');
+      stateLine.textContent = hasText ? 'Clarification is recorded without granting permission.' : (o ? 'Melvin records your selected answer.' : '');
     } else {
       sendBtn.textContent = k ? 'Send ' + k + (k === 1 ? ' answer' : ' answers') : 'Pick your answers';
       stateLine.textContent = k === 0 ? '' : (k === total ? 'All ' + total + ' answered.' : (total - k) + ' left blank — ' + (total - k === 1 ? 'it keeps' : 'they keep') + ' waiting.');
     }
+    if (S.page.answerBudget) {
+      var used = utf8Bytes(JSON.stringify(answerData())), left = S.page.answerBudget - used;
+      stateLine.textContent += (stateLine.textContent ? ' ' : '') + (left >= 0 ? left + ' bytes left in total.' :
+        'Shorten by at least ' + (-left) + ' bytes. Your text is kept.');
+    }
     sendBtn.disabled = k === 0;
+  }
+
+  function utf8Bytes(text) {
+    return window.TextEncoder ? new TextEncoder().encode(text).length : unescape(encodeURIComponent(text)).length;
+  }
+  function answerData() {
+    var data = {};
+    S.page.questions.forEach(function (q) {
+      data[q.id] = S.answers[q.id] || null;
+      if (q.textMax) { data[q.id + '_text'] = typeof S.answers[q.id + '_text'] === 'string' ? S.answers[q.id + '_text'] : ''; }
+    });
+    return data;
   }
 
   function send() {
     if (S.busy || answeredCount() === 0) { return; }
-    var data = {};
-    S.page.questions.forEach(function (q) { if (S.answers[q.id]) { data[q.id] = S.answers[q.id]; } });
+    var data = answerData();
     var payload = JSON.stringify({ v: 1, nonce: S.nonce || 'demo-demo-demo-1', act: 'send', data: data });
-    var bytes = window.TextEncoder ? new TextEncoder().encode(payload).length : unescape(encodeURIComponent(payload)).length;
-    if (bytes > 4096) { toast('That is too much to send at once.'); return; }
+    if (S.page.answerBudget && utf8Bytes(JSON.stringify(data)) > S.page.answerBudget) {
+      toast('That is too much to send at once. Shorten your answers; your draft is kept.'); return;
+    }
+    if (utf8Bytes(payload) > 4096) { toast('That is too much to send at once. Shorten your answers; your draft is kept.'); return; }
     S.busy = true;
     TG.haptic('impact', 'medium');
     var label = sendBtn.textContent;
@@ -241,9 +281,10 @@
     sendBtn.appendChild(el('span', 'spin'));
     TG.closingConfirmation(false);
     setTimeout(function () {
-      if (S.nonce) { session('melvin-approvals:a:' + S.nonce, null); }
       var posted = TG.inTelegram && S.nonce ? TG.sendData(payload) : false;
       if (!posted) { showPayload(payload); reset(); return; }
+      // Keep the draft until the server acknowledgement closes the app. A
+      // local sendData acceptance is not proof that the answer was recorded.
       sendBtn.textContent = '✓ Sent';
       TG.haptic('notification', 'success');
       // the Mini App closes itself after sendData; still here means this launch mode cannot send
