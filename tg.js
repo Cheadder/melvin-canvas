@@ -124,6 +124,16 @@
     else { post('web_app_trigger_haptic_feedback', { type: 'selection_change' }); }
   }
 
+  function safeExternalURL(value) {
+    if (typeof value !== 'string' || value.length > 1500 || /[\s\\]/.test(value)) { return null; }
+    var match = /^https:\/\/([a-z0-9.-]+)(?::443)?(?:[/?][^\s#\\]*)?$/i.exec(value);
+    if (!match) { return null; }
+    var host = match[1].toLowerCase();
+    if (host.length > 253 || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host)
+        || /\.(?:local|localhost|internal|lan|home|invalid|test)$/.test(host)) { return null; }
+    return value;
+  }
+
   w.MelvinTG = {
     token: launch.token,
     params: P,
@@ -136,6 +146,11 @@
     atLeast: atLeast,
     on: function (type, fn) { (handlers[type] = handlers[type] || []).push(fn); },
     post: post,
+    safeExternalURL: safeExternalURL,
+    openLink: function (value) {
+      var url = safeExternalURL(value);
+      return !!url && inTelegram && post('web_app_open_link', { url: url, try_instant_view: false });
+    },
     ready: function () { post('web_app_ready'); },
     expand: function () { post('web_app_expand'); },
     requestTheme: function () { post('web_app_request_theme'); },

@@ -2,7 +2,7 @@
  *
  * Privacy: the page content lives only in the fragment (#v1.<nonce>.<deflate-raw, base64url>), which browsers never
  * send to the web host. This file holds no data of anyone's. Text is always set with textContent (never innerHTML);
- * images must be data:image URIs; there are no links, fonts or requests to anywhere (see the CSP in index.html).
+ * images must be data:image URIs; only an explicit original-story tap opens a validated public HTTPS link.
  */
 (function () {
   'use strict';
@@ -251,6 +251,46 @@
     c.appendChild(top);
     if (b.text) { c.appendChild(el('p', '', str(b.text, 400))); }
     if (b.badge) { c.appendChild(el('span', 'badge tone-' + tone(b.tone), str(b.badge, 28))); }
+    return c;
+  };
+  R.article = function (b) {
+    var c = el('details', 'glass fold news-article');
+    var top = el('summary');
+    top.appendChild(el('span', 'ft', str(b.title, 280)));
+    top.appendChild(el('span', 'chev'));
+    c.appendChild(top);
+    var body = el('div', 'fold-body article-body');
+    var source = el('p', 'article-source', str(b.publisher, 100));
+    var when = Date.parse(b.published_at);
+    if (isFinite(when)) {
+      var date = el('time', '', 'Published ' + new Date(when).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}));
+      date.setAttribute('datetime', b.published_at);
+      source.appendChild(date);
+    } else { source.appendChild(el('span', '', 'Publication time unavailable')); }
+    body.appendChild(source);
+    var basis = b.summary_basis === 'article_excerpt' ? 'Article excerpt; may be incomplete' : b.summary_basis === 'feed_excerpt' ? 'Feed excerpt; full article not read' : 'Summary unavailable';
+    var hasSummary = typeof b.summary === 'string' && b.summary && b.summary.length <= 600 &&
+      (b.summary_basis === 'article_excerpt' || b.summary_basis === 'feed_excerpt');
+    body.appendChild(el('p', 'article-synopsis', hasSummary ? b.summary : 'A synopsis is not available. Open the original story to read it.'));
+    body.appendChild(el('p', 'article-basis', hasSummary ? basis : 'Summary unavailable'));
+    var readAt = Date.parse(b.article_read_at);
+    if (b.summary_basis === 'article_excerpt' && isFinite(readAt)) {
+      var read = el('time', 'article-basis', 'Read ' + new Date(readAt).toLocaleString(undefined, {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}));
+      read.setAttribute('datetime', b.article_read_at); body.appendChild(read);
+    }
+    var url = typeof TG.safeExternalURL === 'function' ? TG.safeExternalURL(b.url) : null;
+    if (url) {
+      var link = el('a', 'article-original', 'Read original');
+      link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      link.addEventListener('click', function (event) {
+        if (TG.inTelegram) {
+          event.preventDefault();
+          if (typeof TG.openLink !== 'function' || !TG.openLink(url)) { link.textContent = 'Link unavailable in this viewer'; }
+        }
+      });
+      body.appendChild(link);
+    } else { body.appendChild(el('p', 'article-basis', 'Original link unavailable')); }
+    c.appendChild(body);
     return c;
   };
   R.list = function (b) {

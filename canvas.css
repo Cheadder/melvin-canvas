@@ -492,6 +492,16 @@ html[data-scheme="dark"] .section h2 { text-shadow: 0 0 18px rgba(var(--accent-r
 }
 .fold[open] .chev { transform: rotate(45deg); }
 .fold-body { display: flex; flex-direction: column; gap: 4px; padding: 0 10px 10px; }
+.news-article > summary { align-items: flex-start; min-height: 48px; }
+.news-article > summary .ft { font-weight: 650; line-height: 1.4; text-transform: none; letter-spacing: normal; }
+.news-article > summary .chev { flex-shrink: 0; margin-top: 7px; }
+.news-article > summary:focus-visible, .article-original:focus-visible { outline: 2px solid var(--text); outline-offset: -3px; }
+.news-article .article-body { gap: 10px; padding: 0 18px 18px; }
+.article-body p { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
+.article-source, .article-basis { color: var(--hint); font-size: 12px; line-height: 1.5; }
+.article-source time, .article-source span { display: block; }
+.article-synopsis { font-size: 14px; line-height: 1.6; }
+.article-original { color: var(--text); text-underline-offset: 3px; min-height: 32px; display: inline-flex; align-items: center; width: fit-content; }
 .parked-row {
   display: flex;
   align-items: center;
